@@ -30,7 +30,6 @@
 */
 #define EXAMPLE_ESP_WIFI_SSID      "doorSAP"
 #define EXAMPLE_ESP_WIFI_PASS      "password"
-#define EXAMPLE_ESP_MAXIMUM_RETRY  10
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
@@ -43,6 +42,7 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static const char *TAG = "wifi station";
 
+static bool bConnected = false;
 static int s_retry_num = 0;
 
 static char g_GW_ip_str[16];
@@ -59,17 +59,10 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     } 
     else if ( event_id == WIFI_EVENT_STA_DISCONNECTED) 
     {
-      if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY)
-      {
-          esp_wifi_connect();
-          s_retry_num++;
-          ESP_LOGI(TAG, "retry to connect to the AP (%d/%d)", s_retry_num, EXAMPLE_ESP_MAXIMUM_RETRY);
-      } 
-      else
-      {
-          xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-          ESP_LOGI(TAG,"connect to the AP fail");
-      }
+      bConnected = false;
+      esp_wifi_connect();
+      s_retry_num++;
+      ESP_LOGI(TAG, "retry to connect to the AP (Attempt :%d)", s_retry_num );
     }
     else if( event_id == WIFI_EVENT_STA_CONNECTED )
     {
@@ -136,11 +129,19 @@ void wifi_init_sta(void)
 
   ESP_LOGI(TAG, "wifi_init_sta finished.");
 
+    /* The event will not be processed after unregister */
+    //ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
+    //ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
+    //vEventGroupDelete(s_wifi_event_group);
+}
+
+void wifi_wait_to_connect(void)
+{
   /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
    * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
   EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-          pdFALSE,
+          pdTRUE,
           pdFALSE,
           portMAX_DELAY);
 
@@ -152,6 +153,7 @@ void wifi_init_sta(void)
     tcpip_adapter_get_ip_info( TCPIP_ADAPTER_IF_STA, &info );  
     sprintf(g_GW_ip_str, IPSTR, IP2STR(&info.gw));
     ESP_LOGI(TAG, "connected to: %s", g_GW_ip_str);
+    bConnected = true;
   }
   else if (bits & WIFI_FAIL_BIT) 
   {
@@ -162,11 +164,6 @@ void wifi_init_sta(void)
   {
     ESP_LOGE(TAG, "UNEXPECTED EVENT");
   }
-
-    /* The event will not be processed after unregister */
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
-    vEventGroupDelete(s_wifi_event_group);
 }
 
 //#include <netinet/in.h>
@@ -264,6 +261,9 @@ void send_image( uint8_t image_idx, uint8_t* image, uint32_t size, uint8_t blob 
     if (sendto(fd,message,msgLen,0,(struct sockaddr *) &addr, sizeof(addr)) < 0) 
     {
       ESP_LOGE(TAG,"sendTo failed.");
+      // This blob is going to be incomplete anyway. this will
+      // get retried on the next image captured
+      break;
     }
     
     frame++;
@@ -272,7 +272,6 @@ void send_image( uint8_t image_idx, uint8_t* image, uint32_t size, uint8_t blob 
 
     vTaskDelay( 10 / portTICK_PERIOD_MS );
   }
-  
 }
 
 void app_main(void)
@@ -293,10 +292,19 @@ void app_main(void)
   CAM_set_format( RAW );
   
   ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-  wifi_init_sta();
+
+  wifi_init_sta();  
   
   do
-  {  
+  {
+    if( !bConnected )
+    {
+      wifi_wait_to_connect( );
+    }
+    
+    CAM_resume( );
+    vTaskDelay( 500 / portTICK_PERIOD_MS );
+    
     if( !CAM_start( ))
     {
       ESP_LOGE(TAG,"Failed to communicate with the camera" );
@@ -314,14 +322,17 @@ void app_main(void)
       vTaskDelay( 30 / portTICK_PERIOD_MS );
       CAM_start_capture( );
       
-      ESP_LOGI(TAG,"Timing control register is 0x%02X", CAM_read_reg(ARDUCHIP_TIM));
+      ESP_LOGD(TAG,"Timing control register is 0x%02X", CAM_read_reg(ARDUCHIP_TIM));
       
-      while( 1 )
+      while( bConnected )
       {  
         if( CAM_get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK))
         {
+          
+          CAM_standby( );
+          
           uint32_t fifo_len = CAM_read_fifo_length( );
-          ESP_LOGI(TAG, "Fifo Len = %d", fifo_len);
+          ESP_LOGD(TAG, "Fifo Len = %d", fifo_len);
           
           //uint8_t* image = (uint8_t*)malloc(fifo_len +4); // +1 is for the SPI dummy byte
 
@@ -336,11 +347,11 @@ void app_main(void)
   #define IMG_ROW_SIZE       (IMG_H_SIZE*IMG_BLOB_SIZE*PIXEL_SIZE)
   #define ROW_COUNT          (IMG_V_SIZE/IMG_BLOB_SIZE)
 
-          if( fifo_len != IMG_SIZE )
+          if( fifo_len != IMG_SIZE + 8 )
           {
             ESP_LOGW(TAG,"Data in FIFO does not match image size. Fifo = %d. Img = %d",
               fifo_len,
-              IMG_SIZE );
+              IMG_SIZE + 8 );
           }
 
           uint8_t* blob[COL_COUNT];
@@ -376,7 +387,7 @@ void app_main(void)
               // ESP_LOGI(TAG,"SPI read %d bytes",read_size-1);
             }
             
-            printf( "// Row %d\n", r );
+            ESP_LOGI( TAG, "Sending img:%d, row:%d", image_idx, r );
             
             for( int c=0; c<COL_COUNT; c++ )
             {           
@@ -416,10 +427,8 @@ void app_main(void)
       // ESP_LOGI(TAG, "Fifo size is %d", CAM_read_fifo_length( ));
     }
     
-    CAM_standby( );  
-    vTaskDelay( 5000 / portTICK_PERIOD_MS );
-    CAM_resume( );
-    vTaskDelay( 500 / portTICK_PERIOD_MS );
+    // ESP_LOGI( TAG, "Sleeping 5sec..." );
+    // vTaskDelay( 1000 / portTICK_PERIOD_MS );
     
   } while( 1 );
     

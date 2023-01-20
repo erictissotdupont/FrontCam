@@ -62,10 +62,10 @@ bool CAM_start()
     CAM_wrSensorRegs8_8(OV2640_QVGA);
   }
   
-  ESP_LOGI(TAG,"ArduCAM version is 0x%02X", CAM_read_reg(0x40));
+  ESP_LOGD(TAG,"ArduCAM version is 0x%02X", CAM_read_reg(0x40));
 
-  ESP_LOGI(TAG,"GPIO direction is 0x%02X", CAM_read_reg(0x05));
-  ESP_LOGI(TAG,"GPIO value is     0x%02X", CAM_read_reg(0x06));
+  ESP_LOGD(TAG,"GPIO direction is 0x%02X", CAM_read_reg(0x05));
+  ESP_LOGD(TAG,"GPIO value is     0x%02X", CAM_read_reg(0x06));
   
   return true;
 }
@@ -406,7 +406,7 @@ byte CAM_rdSensorReg8_8(uint8_t regID, uint8_t* regDat)
   else
   {
     if( regDat ) *regDat = val;
-    ESP_LOGI(TAG, "I2C read 0x%02X = 0x%02X", regID, val );
+    ESP_LOGD(TAG, "I2C read 0x%02X = 0x%02X", regID, val );
   }
   
   //i2c_write_blocking(I2C_PORT, sensor_addr, &regID, 1, true );
